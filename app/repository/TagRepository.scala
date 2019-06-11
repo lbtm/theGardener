@@ -1,36 +1,65 @@
 package repository
 
-import anorm.SqlParser._
-import anorm._
 import javax.inject.Inject
-import play.api.db.Database
+import play.api.db.slick._
+import slick.jdbc.JdbcProfile
+import utils._
 
-class TagRepository @Inject()(db: Database) {
-  private val parser = scalar[String]
+import scala.concurrent._
+import scala.concurrent.duration.Duration.Inf
+
+class TagRepository @Inject()(val dbConfigProvider: DatabaseConfigProvider)(implicit ec: ExecutionContext) extends HasDatabaseConfigProvider[JdbcProfile] {
+
+  import dbConfig.profile.api._
+
+  case class ScenarioTag(scenarioId: Long, name: String)
+
+  case class FeatureTag(featureId: Long, name: String)
+
+  class Tags(tag: Tag) extends Table[String](tag, "tag") {
+    def name = column[String]("name", O.PrimaryKey)
+    def * = name
+  }
+
+  lazy val tags = TableQuery[Tags]
+
+  class ScenarioTags(tag: Tag) extends Table[ScenarioTag](tag, "scenario_tag") {
+    def scenarioId = column[Long]("scenarioId")
+    def name = column[String]("name")
+
+    def * = (scenarioId, name).mapTo[ScenarioTag]
+    def pk = primaryKey("pk_scenario_tag", (scenarioId, name))
+  }
+
+  lazy val scenarioTags = TableQuery[ScenarioTags]
+
+  class FeatureTags(tag: Tag) extends Table[FeatureTag](tag, "feature_tag") {
+    def featureId = column[Long]("featureId")
+    def name = column[String]("name")
+
+    def * = (featureId, name).mapTo[FeatureTag]
+    def pk = primaryKey("pk_scenario_tag", (featureId, name))
+  }
+
+  lazy val featureTags = TableQuery[FeatureTags]
 
   def count(): Long = {
-    db.withConnection { implicit connection =>
-      SQL"SELECT COUNT(*) FROM tag".as(scalar[Long].single)
-    }
+    Await.result(db.run(tags.length.result), Inf)
   }
 
   private def deleteIfEmpty(tag: String) = {
-    db.withConnection { implicit connection =>
-      val featureTagCount = SQL"SELECT COUNT(*) FROM feature_tag WHERE name = $tag".as(scalar[Long].single)
-      val scenarioTagCount = SQL"SELECT COUNT(*) FROM scenario_tag WHERE name = $tag".as(scalar[Long].single)
+    val featureTagCount = Await.result(db.run(featureTags.length.result), Inf)
+    val scenarioTagCount = Await.result(db.run(scenarioTags.length.result), Inf)
 
-      if (featureTagCount == 0 && scenarioTagCount == 0) {
-        SQL"DELETE FROM tag WHERE name = $tag".executeUpdate()
-      }
+    if (featureTagCount == 0 && scenarioTagCount == 0) {
+      Await.result(db.run(tags.filter(_.name === tag).delete), Inf)
     }
   }
 
   def deleteByFeatureId(featureId: Long, tags: Seq[String]): Unit = {
-    db.withConnection { implicit connection =>
-      tags.foreach { tag =>
-        SQL"DELETE FROM feature_tag WHERE featureId = $featureId AND name = $tag".executeUpdate()
-        deleteIfEmpty(tag)
-      }
+    tags.foreach { tag =>
+      Await.result(db.run(featureTags.filter(t => t.featureId === featureId && t.name === tag).delete), Inf)
+      deleteIfEmpty(tag)
     }
   }
 
@@ -39,64 +68,48 @@ class TagRepository @Inject()(db: Database) {
   def deleteAllByScenarioId(scenarioId: Long): Unit = deleteByScenarioId(scenarioId, findAllByScenarioId(scenarioId))
 
   def deleteByScenarioId(scenarioId: Long, tags: Seq[String]): Unit = {
-    db.withConnection { implicit connection =>
-      tags.foreach { tag =>
-        SQL"DELETE FROM scenario_tag WHERE scenarioId = $scenarioId AND name = $tag".executeUpdate()
-        deleteIfEmpty(tag)
-      }
+    tags.foreach { tag =>
+      Await.result(db.run(scenarioTags.filter(t => t.scenarioId === scenarioId && t.name === tag).delete), Inf)
+      deleteIfEmpty(tag)
     }
   }
 
   def deleteAll(): Unit = {
-    db.withConnection { implicit connection =>
-      SQL"TRUNCATE TABLE tag".executeUpdate()
-      SQL"TRUNCATE TABLE feature_tag".executeUpdate()
-      SQL"TRUNCATE TABLE scenario_tag".executeUpdate()
-    }
+    Await.result(db.run(tags.delete), Inf)
+    Await.result(db.run(featureTags.delete), Inf)
+    Await.result(db.run(scenarioTags.delete), Inf)
   }
 
   def deleteAllFeatureTag(): Unit = {
-    db.withConnection { implicit connection =>
-      val tags = findAll()
-      SQL"TRUNCATE TABLE feature_tag".executeUpdate()
-      tags.foreach(deleteIfEmpty)
-    }
+    val tags = findAll()
+    Await.result(db.run(featureTags.delete), Inf)
+    tags.foreach(deleteIfEmpty)
   }
 
   def deleteAllScenarioTag(): Unit = {
-    db.withConnection { implicit connection =>
-      val tags = findAll()
-      SQL"TRUNCATE TABLE scenario_tag".executeUpdate()
-      tags.foreach(deleteIfEmpty)
-    }
+    val tags = findAll()
+    Await.result(db.run(scenarioTags.delete), Inf)
+    tags.foreach(deleteIfEmpty)
   }
 
   def findAll(): Seq[String] = {
-    db.withConnection { implicit connection =>
-      SQL"SELECT * FROM tag".as(parser.*)
-    }
+    Await.result(db.run(tags.result), Inf)
   }
 
   def findAllByFeatureId(featureId: Long): Seq[String] = {
-    db.withConnection { implicit connection =>
-      SQL"SELECT name FROM feature_tag WHERE featureId = $featureId".as(parser.*)
-    }
+    Await.result(db.run(featureTags.filter(t => t.featureId === featureId).map(_.name).result), Inf)
   }
 
   def findAllByScenarioId(scenarioId: Long): Seq[String] = {
-    db.withConnection { implicit connection =>
-      SQL"SELECT name FROM scenario_tag WHERE scenarioId = $scenarioId".as(parser.*)
-    }
+    Await.result(db.run(scenarioTags.filter(t => t.scenarioId === scenarioId).map(_.name).result), Inf)
   }
 
   def saveAllByFeatureId(featureId: Long, tags: Seq[String]): Seq[String] = {
     deleteAllByFeatureId(featureId)
 
-    db.withConnection { implicit connection =>
-      tags.foreach { tag =>
-        SQL"REPLACE INTO tag(name) VALUES ($tag)".executeUpdate()
-        SQL"REPLACE INTO feature_tag(featureId, name) VALUES($featureId, $tag)".executeUpdate()
-      }
+    tags.foreach { tag =>
+      Await.result(db.run(this.tags.insertOrUpdate(tag)).logError(s"Error while saving feature $featureId tag $tag"), Inf)
+      Await.result(db.run(featureTags.insertOrUpdate(FeatureTag(featureId, tag))).logError(s"Error while saving feature $featureId tag $tag"), Inf)
     }
 
     findAllByFeatureId(featureId)
@@ -106,11 +119,9 @@ class TagRepository @Inject()(db: Database) {
   def saveAllByScenarioId(scenarioId: Long, tags: Seq[String]): Seq[String] = {
     deleteAllByScenarioId(scenarioId)
 
-    db.withConnection { implicit connection =>
-      tags.foreach { tag =>
-        SQL"REPLACE INTO tag(name) VALUES ($tag)".executeUpdate()
-        SQL"REPLACE INTO scenario_tag(scenarioId, name) VALUES($scenarioId, $tag)".executeUpdate()
-      }
+    tags.foreach { tag =>
+      Await.result(db.run(this.tags.insertOrUpdate(tag)).logError(s"Error while saving scenario $scenarioId tag $tag"), Inf)
+      Await.result(db.run(scenarioTags.insertOrUpdate(ScenarioTag(scenarioId, tag))).logError(s"Error while saving scenario $scenarioId tag $tag"), Inf)
     }
 
     findAllByScenarioId(scenarioId)

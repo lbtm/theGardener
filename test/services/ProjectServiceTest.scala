@@ -66,7 +66,7 @@ class ProjectServiceTest extends WordSpec with MustMatchers with BeforeAndAfter 
       when(featureRepository.saveAll(any[Seq[Feature]])).thenReturn(Seq())
       when(featureRepository.findByBranchIdAndPath(any[Long], any[String])).thenReturn(None)
 
-      when(branchRepository.save(any[Branch])).thenReturn(Branch(1, "master", isStable = true, project.id))
+//      when(branchRepository.save(any[Branch])).thenReturn(Branch(1, "master", isStable = true, project.id))
 
       val result = projectService.checkoutRemoteBranches(project)
 
@@ -102,9 +102,9 @@ class ProjectServiceTest extends WordSpec with MustMatchers with BeforeAndAfter 
       when(featureRepository.saveAll(any[Seq[Feature]])).thenReturn(Seq())
       when(featureRepository.findByBranchIdAndPath(any[Long], any[String])).thenReturn(None)
 
-      when(branchRepository.save(any[Branch])).thenReturn(masterBranch)
-      when(branchRepository.findByProjectIdAndName(any[String], any[String])).thenReturn(Some(masterBranch))
-      when(branchRepository.findAllByProjectId(any[String])).thenReturn(Seq(masterBranch, Branch(2, bugfixBranch, isStable = false, project.id)))
+//      when(branchRepository.save(any[Branch])).thenReturn(masterBranch)
+//      when(branchRepository.findByProjectIdAndName(any[String], any[String])).thenReturn(Some(masterBranch))
+//      when(branchRepository.findAllByProjectId(any[String])).thenReturn(Seq(masterBranch, Branch(2, bugfixBranch, isStable = false, project.id)))
 
 
       val result = projectService.synchronizeAll()
