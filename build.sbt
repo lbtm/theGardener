@@ -114,3 +114,36 @@ scalacOptions in Scapegoat += "-P:scapegoat:overrideLevels:TraversableHead=Warni
 evictionWarningOptions in update := EvictionWarningOptions.empty
 
 routesGenerator := InjectedRoutesGenerator
+
+// Enabling Docker plugin
+enablePlugins(sbtdocker.DockerPlugin, JavaAppPackaging)
+
+// Dockerfile definition
+dockerfile in docker := {
+  val appDir: File = stage.value
+  val defaultConfFile: File = new File("./docker/application.conf")
+  val loadSampleDataScript: File = new File("./docker/loadSampleDataH2.sh")
+  val targetDir = "/app"
+  val confDir = "/app-conf"
+  val gitDataDir = "/git-data"
+  val embeddedDbDir = "/data"
+
+  new Dockerfile {
+    from("openjdk:8-jre")
+    runRaw(s"mkdir $confDir && mkdir $gitDataDir && mkdir $embeddedDbDir")
+    expose(9000)
+    entryPoint(s"$targetDir/bin/${executableScriptName.value}")
+    cmd(s"-Dconfig.file=$confDir/application.conf")
+    copy(defaultConfFile, s"$confDir/", chown = "daemon:daemon")
+    copy(loadSampleDataScript, s"/", chown = "daemon:daemon")
+    copy(appDir, targetDir, chown = "daemon:daemon")
+  }
+}
+
+// Images definitions to build and push
+val dockerOrganization = "kelkoogroup"
+val dockerImage = "thegardener"
+imageNames in docker := Seq(
+  ImageName(s"$dockerOrganization/$dockerImage:latest"),
+  ImageName(s"$dockerOrganization/$dockerImage:${version.value}")
+)

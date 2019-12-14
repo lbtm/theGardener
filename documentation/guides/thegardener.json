@@ -5,6 +5,7 @@
     "description": "How do we interact with theGardener ?",
     "pages": [
       "roles",
+      "run",
       "install",
       "configure",
       "operate",
