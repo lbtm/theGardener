@@ -11,6 +11,7 @@ import play.api.cache.SyncCacheApi
 import play.api.libs.json.Json
 import repositories._
 import utils._
+import services.MenuService.getCorrectedPath
 
 import scala.util.Try
 
@@ -20,7 +21,7 @@ case class DirectoryMeta(label: Option[String] = None, description: Option[Strin
 
 case class TagsModule(tags: Seq[String])
 
-case class ScenariosModule(project: Option[String] = None, branchName: Option[String] = None, feature: Option[String] = None, select: Option[TagsModule] = None)
+case class ScenariosModule(project: Option[String] = None, branchName: Option[String] = None, feature: Option[String] = None, select: Option[TagsModule] = None, includeBackground: Option[Boolean] = None)
 
 case class IncludeExternalPageModule(url: String)
 
@@ -35,13 +36,13 @@ case class Module(directory: Option[DirectoryMeta] = None,
 
 sealed trait PageFragmentUnderProcessingStatus
 
-case object PageFragmentStatusMakdown extends PageFragmentUnderProcessingStatus
+case object PageFragmentStatusMarkdown extends PageFragmentUnderProcessingStatus
 
 case object PageFragmentStatusMakdownEscape extends PageFragmentUnderProcessingStatus
 
 case object PageFragmentStatusModule extends PageFragmentUnderProcessingStatus
 
-case class PageFragmentUnderProcessing(status: PageFragmentUnderProcessingStatus = PageFragmentStatusMakdown,
+case class PageFragmentUnderProcessing(status: PageFragmentUnderProcessingStatus = PageFragmentStatusMarkdown,
                                        data: Option[String] = None,
                                        markdown: Option[String] = None,
                                        page: Option[PageMeta] = None,
@@ -77,7 +78,16 @@ class PageService @Inject()(config: Configuration, projectRepository: ProjectRep
 
   def getLocalRepository(projectId: String, branch: String): String = s"$projectsRootDirectory$projectId/$branch/".fixPathSeparator
 
-  def getPagePath(projectId: String, branch: String, path: String, documentationRootPath: String): String = s"$projectId>$branch>${path.substring(path.indexOf(documentationRootPath) + documentationRootPath.length, path.length)}".replace(".md", "")
+  def getPagePath(projectId: String, branch: String, path: String, documentationRootPath: String): String = {
+    val branchName = if (branch == "") {
+      projectRepository.findById(projectId).map(_.stableBranch)
+    } else {
+      branch
+    }
+
+    s"$projectId>$branchName>${path.substring(path.indexOf(documentationRootPath) + documentationRootPath.length, path.length)}".replace(".md", "")
+  }
+
 
   def processDirectory(branch: Branch, path: String, localDirectoryPath: String, relativePath: String = "/", order: Int = 0, isRoot: Boolean = true): Option[Directory] = {
     val metaFile = new File(localDirectoryPath + "/" + documentationMetaFile)
@@ -109,16 +119,17 @@ class PageService @Inject()(config: Configuration, projectRepository: ProjectRep
   }
 
   def computePageFromPath(path: String, refresh: Boolean = false): Option[PageWithContent] = {
+    val pathWithBranch = projectRepository.findById(path.split(">")(0)).map { project =>
+      if (path.contains(">>")) path.replace(">>", s">${project.stableBranch}>") else path
+    }.getOrElse(s" Error while computing Page for the path $path")
     if (refresh) {
-      computePageFromPathUsingDatabase(path)
+      computePageFromPathUsingDatabase(pathWithBranch)
     } else {
-      cache.get[PageWithContent](computePageCacheKey(path)) match {
-        case Some(page) => {
+      cache.get[PageWithContent](computePageCacheKey(pathWithBranch)) match {
+        case Some(page) =>
           Some(page)
-        }
-        case None => {
-          computePageFromPathUsingDatabase(path)
-        }
+        case None =>
+          computePageFromPathUsingDatabase(pathWithBranch)
       }
     }
   }
@@ -139,12 +150,11 @@ class PageService @Inject()(config: Configuration, projectRepository: ProjectRep
         }.map { fragments =>
           processPageFragments(fragments, pageJoinProject)
         } match {
-          case Some(fragments) => {
+          case Some(fragments) =>
             logger.debug(s"Page computed : $path")
-            val page = PageWithContent(pageJoinProject.page, fragments)
-            replacePageInCache(path,page)
+            val page = PageWithContent(pageJoinProject.page.copy(path = getCorrectedPath(path, pageJoinProject.project)), fragments)
+            replacePageInCache(path, page)
             Some(page)
-          }
           case _ => None
         }
       case _ => None
@@ -212,66 +222,41 @@ class PageService @Inject()(config: Configuration, projectRepository: ProjectRep
     }._1
   }
 
+  // scalastyle:off cyclomatic.complexity
   private def processPageFragmentLine(line: String, path: String, fragments: Seq[PageFragmentUnderProcessing], currentFragment: PageFragmentUnderProcessing): (Seq[PageFragmentUnderProcessing], PageFragmentUnderProcessing) = {
     val currentFragmentWithNewLine = appendCurrentLine(currentFragment, line)
     val newFragmentWithNewLine = appendCurrentLine(PageFragmentUnderProcessing(), line)
 
     currentFragment.status match {
 
-      case PageFragmentStatusMakdownEscape =>
+      case PageFragmentStatusMakdownEscape if line.trim.startsWith(MarkdownEscape) => (fragments, currentFragmentWithNewLine.copy(status = PageFragmentStatusMarkdown))
+      case PageFragmentStatusMakdownEscape => (fragments, currentFragmentWithNewLine)
 
-        if (line.trim.startsWith(MarkdownEscape)) {
-          (fragments, currentFragmentWithNewLine.copy(status = PageFragmentStatusMakdown))
+      case PageFragmentStatusModule => processPageFragmentModule(line, path, fragments, currentFragment, currentFragmentWithNewLine)
 
-        } else {
-          (fragments, currentFragmentWithNewLine)
-        }
+      case _ if line.trim.startsWith(MarkdownEnd) => (fragments :+ currentFragment.copy(markdown = currentFragment.data), PageFragmentUnderProcessing())
+      case _ if line.trim.startsWith(MarkdownEscape) => (fragments, currentFragmentWithNewLine.copy(status = PageFragmentStatusMakdownEscape))
+      case _ if line.trim.startsWith(ModuleStart) => (fragments :+ currentFragment.copy(markdown = currentFragment.data), newFragmentWithNewLine.copy(status = PageFragmentStatusModule))
 
-      case PageFragmentStatusModule =>
-
-        processPageFragmentModule(line, path, fragments, currentFragment, currentFragmentWithNewLine)
-
-      case _ =>
-
-        if (line.trim.startsWith(MarkdownEnd)) {
-          (fragments :+ currentFragment.copy(markdown = currentFragment.data), PageFragmentUnderProcessing())
-
-        } else if (line.trim.startsWith(MarkdownEscape)) {
-          (fragments, currentFragmentWithNewLine.copy(status = PageFragmentStatusMakdownEscape))
-
-        } else if (line.trim.startsWith(ModuleStart)) {
-          (fragments :+ currentFragment.copy(markdown = currentFragment.data), newFragmentWithNewLine.copy(status = PageFragmentStatusModule))
-
-        } else {
-          (fragments, currentFragmentWithNewLine)
-        }
+      case _ => (fragments, currentFragmentWithNewLine)
     }
+    // scalastyle:on cyclomatic.complexity
   }
+
 
   private def processPageFragmentModule(line: String, path: String, fragments: Seq[PageFragmentUnderProcessing], currentFragment: PageFragmentUnderProcessing, currentFragmentWithNewLine: PageFragmentUnderProcessing) = {
     if (line.trim.startsWith(MarkdownCodeStart)) {
 
       currentFragment.data.flatMap(data => parseModule(data.replace(ModuleStart, ""), path)) match {
-        case Some(module) =>
+        case Some(Module(_, Some(page), _, _)) =>
+          (fragments :+ currentFragment.copy(page = Some(page)), PageFragmentUnderProcessing())
 
-          module.page match {
-            case Some(page) => (fragments :+ currentFragment.copy(page = Some(page)), PageFragmentUnderProcessing())
-            case _ =>
+        case Some(Module(_, _, Some(scenarios), _)) =>
+          (fragments :+ currentFragment.copy(scenariosModule = Some(scenarios)), PageFragmentUnderProcessing())
 
-              module.scenarios match {
+        case Some(Module(_, _, _, Some(include))) =>
+          (fragments :+ currentFragment.copy(includeExternalPage = Some(include)), PageFragmentUnderProcessing())
 
-                case Some(scenarios) => (fragments :+ currentFragment.copy(scenariosModule = Some(scenarios)), PageFragmentUnderProcessing())
-                case _ =>
-
-                  module.includeExternalPage match {
-
-                    case Some(include) => (fragments :+ currentFragment.copy(includeExternalPage = Some(include)), PageFragmentUnderProcessing())
-                    case _ =>
-                      (fragments, PageFragmentUnderProcessing())
-
-                  }
-              }
-          }
         case _ =>
           (fragments, PageFragmentUnderProcessing())
       }
@@ -282,38 +267,31 @@ class PageService @Inject()(config: Configuration, projectRepository: ProjectRep
 
   def processPageFragments(fragments: Seq[PageFragmentUnderProcessing], pageJoinProject: PageJoinProject): Seq[PageFragment] = {
     fragments.map {
-      fragmentUnderProcessing =>
 
-        fragmentUnderProcessing.status match {
+      case PageFragmentUnderProcessing(PageFragmentStatusModule, _, _, _, Some(scenariosModule), _, _) =>
+        val feature = buildFeature(scenariosModule, pageJoinProject)
 
-          case PageFragmentStatusModule =>
-            fragmentUnderProcessing.scenariosModule match {
-              case Some(scenariosModule) =>
-                val feature = buildFeature(scenariosModule, pageJoinProject)
-                PageFragmentUnderProcessing(scenarios = feature)
-              case _ =>
-                fragmentUnderProcessing
-            }
+        if (scenariosModule.includeBackground.getOrElse(false)) {
+          PageFragmentUnderProcessing(scenarios = feature)
 
-          case PageFragmentStatusMakdown =>
-            fragmentUnderProcessing.markdown match {
-              case Some(rawMarkdown) =>
-                val images = findPageImagesWithRelativePath(rawMarkdown)
-                val references = findPageReferencesWithRelativePath(rawMarkdown)
-                val markdown = (images ++ references).fold(rawMarkdown)((acc, relativePath) => acc.replace(relativePath, s"$baseUrl/api/assets?path=${pageJoinProject.directory.path}$relativePath"))
-                PageFragmentUnderProcessing(markdown = Some(markdown))
-              case _ =>
-                fragmentUnderProcessing
-            }
-
-          case _ =>
-            fragmentUnderProcessing
+        } else {
+          PageFragmentUnderProcessing(scenarios = feature.map(_.copy(background = None)))
         }
 
-    }.map {
-      fragment =>
-        PageFragment(fragment)
-    }.filter(fragment => fragment.`type` != PageFragment.TypeUnknown)
+      case PageFragmentUnderProcessing(PageFragmentStatusMarkdown, _, Some(rawMarkdown), _, _, _, _) =>
+
+        val images = findPageImagesWithRelativePath(rawMarkdown)
+        val references = findPageReferencesWithRelativePath(rawMarkdown)
+        val markdown = (images ++ references).fold(rawMarkdown)((acc, relativePath) => acc.replace(relativePath, s"$baseUrl/api/assets?path=${
+          pageJoinProject.directory.path
+        }$relativePath"))
+
+        PageFragmentUnderProcessing(markdown = Some(markdown))
+
+
+      case fragmentUnderProcessing => fragmentUnderProcessing
+
+    }.map(PageFragment(_)).filter(fragment => fragment.`type` != PageFragment.TypeUnknown)
   }
 
   def buildFeature(scenariosModule: ScenariosModule, currentPageJoinProject: PageJoinProject): Option[Feature] = {
@@ -336,8 +314,9 @@ class PageService @Inject()(config: Configuration, projectRepository: ProjectRep
     val filter = ProjectMenuItem(project.id, project.name, branchName, featureFilter, tagsFilter)
     val documentation = gherkinRepository.buildProjectGherkin(filter)
 
-    documentation.branches.find(_.name.equals(branchName)).flatMap { branch =>
-      branch.features.find(_.path.equals(featureFilter.getOrElse("")))
+    documentation.branches.find(_.name.equals(branchName)).flatMap {
+      branch =>
+        branch.features.find(_.path.equals(featureFilter.getOrElse("")))
     }
   }
 
@@ -355,7 +334,7 @@ class PageService @Inject()(config: Configuration, projectRepository: ProjectRep
         PageFragment(pageFragment.`type`, PageFragmentContent(replaceVariableInString(pageFragment.data.markdown.getOrElse("there is no markdown"), variables.toIndexedSeq, 0)))
       } else {
         if (pageFragment.`type` == "includeExternalPage") {
-          PageFragment(pageFragment.`type`, PageFragmentContent( includeExternalPage = replaceVariableInString(pageFragment.data.includeExternalPage.getOrElse("there is no markdown"), variables.toIndexedSeq, 0)))
+          PageFragment(pageFragment.`type`, PageFragmentContent(includeExternalPage = replaceVariableInString(pageFragment.data.includeExternalPage.getOrElse("there is no markdown"), variables.toIndexedSeq, 0)))
         } else {
           pageFragment
         }
@@ -369,6 +348,10 @@ class PageService @Inject()(config: Configuration, projectRepository: ProjectRep
     } else {
       Option(texte)
     }
+  }
+
+  def getAllPagePaths(project: Project, directoryId: Long): Seq[Page] = {
+    pageRepository.findAllByDirectoryId(directoryId).map(page => page.copy(path = getCorrectedPath(page.path, project)))
   }
 
 }
