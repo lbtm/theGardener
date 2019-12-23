@@ -22,13 +22,13 @@ jobs:
     - uses: actions/setup-node@v1
       with:
         node-version: '10.x'
-        
+
     - name: npm cache
       uses: actions/cache@v1
       with:
         path: frontend/node_modules
         key: ${{ runner.os }}-${{ hashFiles('frontend/package-lock.json')}}
-        
+
     - name: npm install
       run: |
         npm install -g @angular/cli
@@ -36,14 +36,14 @@ jobs:
         cd ./node_modules/protractor && npm i webdriver-manager@latest && cd ../..
         npm run pree2e
       working-directory: frontend
-    
+
     - name: npm test
       run:  |
         export CI=true
         ./node_modules/tslint/bin/tslint -t json -o report.json --project . --force
         ng test --watch=false --progress=false --code-coverage
       working-directory: frontend
-      
+
     - name: ng build --prod
       run: ng build --no-progress --prod --outputPath ../public/dist
       working-directory: frontend
